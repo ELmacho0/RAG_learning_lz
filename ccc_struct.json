@@ -1,0 +1,130 @@
+{
+  "shape": {
+    "rows": 6,
+    "cols": 5
+  },
+  "num_cells": 3,
+  "level_cols": [
+    0,
+    1,
+    2
+  ],
+  "attr_cols": [
+    3,
+    4
+  ],
+  "spaniness": [
+    1.0,
+    1.0,
+    0.6,
+    0.6,
+    0.6
+  ],
+  "cells": [
+    {
+      "id": "A",
+      "row_min": 0,
+      "row_max": 5,
+      "col_min": 0,
+      "col_max": 4,
+      "rowspan": 6,
+      "colspan": 5
+    },
+    {
+      "id": "B",
+      "row_min": 1,
+      "row_max": 1,
+      "col_min": 2,
+      "col_max": 2,
+      "rowspan": 1,
+      "colspan": 1
+    },
+    {
+      "id": "C",
+      "row_min": 1,
+      "row_max": 1,
+      "col_min": 3,
+      "col_max": 4,
+      "rowspan": 1,
+      "colspan": 2
+    }
+  ],
+  "grid_ids": [
+    [
+      "A",
+      "A",
+      "A",
+      "A",
+      "A"
+    ],
+    [
+      "A",
+      "A",
+      "B",
+      "C",
+      "C"
+    ],
+    [
+      "A",
+      "A",
+      "A",
+      "A",
+      "A"
+    ],
+    [
+      "A",
+      "A",
+      "A",
+      "A",
+      "A"
+    ],
+    [
+      "A",
+      "A",
+      "A",
+      "A",
+      "A"
+    ],
+    [
+      "A",
+      "A",
+      "A",
+      "A",
+      "A"
+    ]
+  ],
+  "tree": [
+    {
+      "id": "A",
+      "children": [
+        {
+          "id": "A",
+          "children": [
+            {
+              "id": "A",
+              "attrs": {
+                "col_3": [
+                  "A"
+                ],
+                "col_4": [
+                  "A"
+                ]
+              }
+            },
+            {
+              "id": "B",
+              "attrs": {
+                "col_3": [
+                  "C"
+                ],
+                "col_4": [
+                  "C"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
