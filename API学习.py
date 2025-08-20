@@ -1,326 +1,512 @@
+# -*- coding: utf-8 -*-
+"""
+multi_llm_basic.py
+统一封装 Kimi（Moonshot）、豆包（Volc Ark）、通义千问（DashScope OpenAI 兼容）、DeepSeek 的基础对话调用。
+默认以“逐字”方式流式输出；如需禁用流式输出，传 stream=False。
+
+环境：Python 3.8+，仅依赖标准库 requests（pip install requests）
+"""
+
 import os
+import sys
 import json
 import time
+import typing as T
 import requests
-from datetime import datetime
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
+# ========== 1) 在此处填写/或用环境变量设置 各大模型的 API Key & Base URL ==========
 
-class DeepSeekAPI:
+# Kimi / Moonshot
+MOONSHOT_API_KEY = os.getenv("sk-tN0ZLxKYNADE0TbIlmMfWMYR4mIdoyx92GGbQ5SkiOoMntB9", "sk-tN0ZLxKYNADE0TbIlmMfWMYR4mIdoyx92GGbQ5SkiOoMntB9")
+# Moonshot 有全球与中国大陆两个域名，二选一：
+MOONSHOT_BASE_URL = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.cn/v1")  # 中国大陆
+# MOONSHOT_BASE_URL = "https://api.moonshot.ai/v1"  # 全球
+
+# 豆包 / 火山方舟 Ark（OpenAI 兼容）
+DOUBAO_API_KEY = os.getenv("0044a172-02c1-443b-91a7-1c325dcd8e1c", "0044a172-02c1-443b-91a7-1c325dcd8e1c")
+DOUBAO_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+
+# 通义千问 / 阿里云 Model Studio（DashScope OpenAI 兼容）
+QWEN_API_KEY = os.getenv("sk-40119c25781c4cf7b12d778f68a3ae37", "sk-40119c25781c4cf7b12d778f68a3ae37")
+# 按区域选择 Base URL（官方建议仅改 base_url、api_key、model 即可）
+# 新加坡：
+QWEN_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+# 中国北京可改为：
+# QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+# DeepSeek（OpenAI 兼容）
+DEEPSEEK_API_KEY = os.getenv("sk-7061426ec317496fbbddc4cc368a931c", "sk-7061426ec317496fbbddc4cc368a931c")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+
+# ========== 2) 通用工具：逐字输出 & SSE 解析 ==========
+
+def _print_char_by_char(text: str) -> None:
+    """将文本逐字打印（不换行），尽量贴合“一个字一个字返回”的交互体验。"""
+    for ch in text:
+        print(ch, end="", flush=True)
+        # 可按需加一点点延迟（体验更像“打字机”），例如：
+        # time.sleep(0.001)
+    # 不追加换行；由上层在结束时决定是否换行
+
+def _iter_sse_lines(resp: requests.Response):
+    # 统一按 UTF-8 解码 SSE 行，避免 requests 误判编码
+    for raw in resp.iter_lines(decode_unicode=False):  # 注意 False
+        if not raw:
+            continue
+        if raw.startswith(b"data:"):
+            data = raw[len(b"data:"):].strip()
+            if data == b"[DONE]":
+                break
+            yield data.decode("utf-8", errors="replace")  # 强制 UTF-8
+
+def _finalize_stream(end: str = "\n"):
+    """统一在流式结束时输出一个换行。"""
+    if end:
+        print(end, end="")
+
+# ========== 3) 各厂商封装 ==========
+
+def call_kimi_chat(
+    model: str,
+    messages: T.List[dict],
+    temperature: float = 0.3,
+    top_p: float = 1.0,
+    max_tokens: T.Optional[int] = None,
+    stop: T.Optional[T.Union[str, T.List[str]]] = None,
+    stream: bool = True,
+    timeout: int = 600,
+    extra: T.Optional[dict] = None,
+) -> str:
     """
-    DeepSeek API交互类
-    支持多轮对话、流式响应、文件读取、参数配置、对话历史保存与读取等功能
+    Kimi / Moonshot Chat Completions 基础调用（OpenAI 风格）
+    Endpoint: {MOONSHOT_BASE_URL}/chat/completions
+    认证：Authorization: Bearer <MOONSHOT_API_KEY>
+
+    支持参数（参考官方 & 第三方权威文档）：
+    - model: str
+        例如 "moonshot-v1-8k", "moonshot-v1-32k", "kimi-k2-0711-preview" 等。
+    - messages: List[dict]
+        OpenAI 消息格式 [{"role":"user","content":"..."}]。
+    - temperature: float ∈ [0, 1]   ← 注意 Moonshot 限定[0,1]（官方说明）
+    - top_p: float ∈ (0, 1]
+    - max_tokens: int > 0（可选）
+    - stop: str | List[str]（最多 16 条，SSE 或非流式均可）
+    - stream: bool（默认 True，使用 SSE 流式）
+    - extra: dict（透传给请求体的其他键）
+    * 工具调用等高级能力此处未覆盖，仅做基础对话演示。
+
+    返回：若 stream=True，函数边收边“逐字”打印，最终返回完整文本；
+         若 stream=False，直接返回完整文本并一次性打印。
     """
+    # Clamp/校验
+    temperature = max(0.0, min(1.0, temperature))  # Moonshot 特别限制
+    if top_p is not None:
+        top_p = max(0.0, min(1.0, top_p))
 
-    def __init__(self, api_key=None):
-        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
-        self.base_url = "https://api.deepseek.com/v1"
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        self.conversation_history = []
-        self.default_params = {
-            "model": "deepseek-chat",
-            "temperature": 0.7,
-            "max_tokens": 2048,
-            "top_p": 0.9,
-            "stream": False
-        }
+    url = f"{MOONSHOT_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {MOONSHOT_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "top_p": top_p,
+        "stream": stream,
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+    if stop is not None:
+        payload["stop"] = stop
+    if extra:
+        payload.update(extra)
 
-        # 创建对话历史保存目录
-        self.history_dir = os.path.join(os.getcwd(), "对话历史")
-        if not os.path.exists(self.history_dir):
-            os.makedirs(self.history_dir)
-
-        # 设置带重试机制的会话
-        self.session = requests.Session()
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504]
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
-
-    def _handle_response(self, response):
-        """处理API响应"""
-        if response.status_code != 200:
-            error_msg = f"API请求失败: {response.status_code} - {response.text}"
-            raise Exception(error_msg)
-        return response.json()
-
-    def _stream_response(self, response):
-        """处理流式响应"""
-        buffer = ""
-        for chunk in response.iter_lines():
-            if chunk:
-                decoded = chunk.decode('utf-8')
-                if decoded.startswith("data: "):
-                    data = decoded[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        json_data = json.loads(data)
-                        content = json_data["choices"][0]["delta"].get("content", "")
-                        print(content, end='', flush=True)
-                        buffer += content
-                    except:
-                        pass
-        print()
-        return buffer
-
-    def chat(self, prompt, model=None, temperature=None, max_tokens=None, stream=False, system_message=None):
-        """与DeepSeek模型对话"""
-        # 更新参数
-        params = {**self.default_params, "stream": stream}
-        if model: params["model"] = model
-        if temperature: params["temperature"] = temperature
-        if max_tokens: params["max_tokens"] = max_tokens
-
-        # 构建消息历史
-        messages = self.conversation_history.copy()
-
-        if system_message:
-            messages.insert(0, {"role": "system", "content": system_message})
-
-        messages.append({"role": "user", "content": prompt})
-
-        # 构造请求体
-        payload = {
-            "messages": messages, **params
-        }
-
-        # 发送请求
-        endpoint = f"{self.base_url}/chat/completions"
-        try:
-            if stream:
-                print("模型回复: ", end='', flush=True)
-                response = self.session.post(
-                    endpoint,
-                    headers=self.headers,
-                    json=payload,
-                    stream=True
-                )
-                full_response = self._stream_response(response)
-            else:
-                response = self.session.post(
-                    endpoint,
-                    headers=self.headers,
-                    json=payload
-                )
-                result = self._handle_response(response)
-                full_response = result["choices"][0]["message"]["content"]
-                print(f"模型回复: {full_response}")
-
-            # 更新对话历史
-            self.conversation_history.append({"role": "user", "content": prompt})
-            self.conversation_history.append({"role": "assistant", "content": full_response})
-
-            # 自动保存对话历史
-            self.save_history()
-
-            return full_response
-
-        except Exception as e:
-            print(f"请求发生错误: {str(e)}")
-            return None
-
-    def read_file(self, file_path):
-        """读取文件并添加到对话上下文"""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                content = file.read()
-
-            self.conversation_history.append({
-                "role": "system",
-                "content": f"用户上传了文件: {os.path.basename(file_path)}\n文件内容:\n{content}"
-            })
-            print(f"已读取文件: {file_path} ({len(content)}字符)")
-            # 保存历史
-            self.save_history()
-            return content
-        except Exception as e:
-            print(f"读取文件失败: {str(e)}")
-            return None
-
-    def reset_history(self):
-        """重置对话历史"""
-        self.conversation_history = []
-        print("对话历史已重置")
-
-    def print_history(self):
-        """打印当前对话历史"""
-        print("\n当前对话历史:")
-        for i, msg in enumerate(self.conversation_history):
-            role = msg["role"]
-            content_preview = msg["content"][:50] + "..." if len(msg["content"]) > 50 else msg["content"]
-            print(f"{i + 1}. [{role}] {content_preview}")
-
-    def list_models(self):
-        """获取可用模型列表"""
-        try:
-            response = self.session.get(
-                f"{self.base_url}/models",
-                headers=self.headers
-            )
-            models = self._handle_response(response)["data"]
-            print("\n可用模型:")
-            for model in models:
-                print(f"- {model['id']} (创建时间: {model['created']})")
-            return models
-        except Exception as e:
-            print(f"获取模型列表失败: {str(e)}")
-            return []
-
-    # 新增功能：保存对话历史
-    def save_history(self, filename=None):
-        """保存当前对话历史到文件"""
-        if not self.conversation_history:
-            print("对话历史为空，无需保存")
-            return
-
-        # 生成默认文件名（时间戳+随机数）
-        if not filename:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"history_{timestamp}.json"
-
-        file_path = os.path.join(self.history_dir, filename)
-
-        try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(self.conversation_history, f, ensure_ascii=False, indent=2)
-            print(f"对话历史已保存至: {file_path}")
-        except Exception as e:
-            print(f"保存对话历史失败: {str(e)}")
-
-    # 新增功能：加载对话历史
-    def load_history(self, filename):
-        """从文件加载对话历史"""
-        file_path = os.path.join(self.history_dir, filename)
-
-        if not os.path.exists(file_path):
-            print(f"文件不存在: {file_path}")
-            return False
-
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                self.conversation_history = json.load(f)
-            print(f"已加载对话历史: {file_path} (共{len(self.conversation_history)}条消息)")
-            return True
-        except Exception as e:
-            print(f"加载对话历史失败: {str(e)}")
-            return False
-
-    # 新增功能：列出保存的对话历史
-    def list_saved_histories(self):
-        """列出所有保存的对话历史文件"""
-        if not os.path.exists(self.history_dir):
-            print("没有保存的对话历史")
-            return []
-
-        files = [f for f in os.listdir(self.history_dir) if f.endswith('.json')]
-        if not files:
-            print("没有保存的对话历史")
-            return []
-
-        print("\n保存的对话历史:")
-        for i, file in enumerate(files, 1):
-            print(f"{i}. {file}")
-        return files
+    out = []
+    with requests.post(url, headers=headers, data=json.dumps(payload), stream=stream, timeout=timeout) as r:
+        r.raise_for_status()
+        if stream:
+            for data in _iter_sse_lines(r):
+                try:
+                    obj = json.loads(data)
+                    delta = obj.get("choices", [{}])[0].get("delta", {})
+                    piece = delta.get("content") or ""
+                    if piece:
+                        _print_char_by_char(piece)
+                        out.append(piece)
+                except Exception:
+                    # 不中断流；忽略异常行
+                    continue
+            _finalize_stream()
+        else:
+            obj = r.json()
+            text = obj.get("choices", [{}])[0].get("message", {}).get("content", "")
+            _print_char_by_char(text)
+            _finalize_stream()
+            out.append(text)
+    return "".join(out)
 
 
-# 主程序
-def main():
-    # 初始化API
-    api_key = input("请输入DeepSeek API密钥: ").strip()
-    deepseek = DeepSeekAPI(api_key)
+def call_doubao_chat(
+    model: str,
+    messages: T.List[dict],
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    max_tokens: T.Optional[int] = None,
+    presence_penalty: float = 0.0,
+    frequency_penalty: float = 0.0,
+    stop: T.Optional[T.Union[str, T.List[str]]] = None,
+    stream: bool = True,
+    timeout: int = 600,
+    extra: T.Optional[dict] = None,
+) -> str:
+    """
+    豆包 / 火山方舟 Ark Chat Completions（OpenAI 兼容）
+    Endpoint: {DOUBAO_BASE_URL}/chat/completions
+    认证：Authorization: Bearer <ARK_API_KEY>
 
-    # 显示可用模型
-    deepseek.list_models()
+    支持参数（Ark 明确标注“OpenAI 兼容”，故沿用标准语义）：
+    - model: str
+        例如 "ep-xxxxxxxx"（推理接入点模型 ID）或官方直连模型名（若开通）。
+    - messages: List[dict]
+    - temperature: float ∈ [0, 2]（OpenAI 兼容惯例）
+    - top_p: float ∈ (0, 1]
+    - max_tokens: int > 0（可选）
+    - presence_penalty: float ∈ [-2, 2]
+    - frequency_penalty: float ∈ [-2, 2]
+    - stop: str | List[str]
+    - stream: bool（默认 True，SSE 流式）
+    - extra: dict 透传
 
-    # 询问是否加载历史对话
-    saved_histories = deepseek.list_saved_histories()
-    if saved_histories:
-        load_choice = input("\n是否加载历史对话? (输入序号，如1；不加载请按回车): ").strip()
-        if load_choice.isdigit():
-            idx = int(load_choice) - 1
-            if 0 <= idx < len(saved_histories):
-                deepseek.load_history(saved_histories[idx])
+    说明：
+    - Ark v3 提供 OpenAI 兼容的 /chat/completions，常见 Base URL：
+      https://ark.cn-beijing.volces.com/api/v3
+    - 若调用“豆包智能体（bots）”，路径不同（/api/v3/bots/chat/completions），本文不涉及。
 
-    print("\nDeepSeek API交互程序已启动")
-    print("可用命令:")
-    print("  /file <路径> - 读取文件到上下文")
-    print("  /reset - 重置对话历史")
-    print("  /history - 查看当前对话历史")
-    print("  /params - 查看当前参数设置")
-    print("  /save [文件名] - 手动保存对话历史（文件名可选）")
-    print("  /load <文件名> - 加载指定对话历史")
-    print("  /list - 列出所有保存的对话历史")
-    print("  /exit - 退出程序")
+    返回：与其他厂商封装一致。
+    """
+    # Clamp
+    if top_p is not None:
+        top_p = max(0.0, min(1.0, top_p))
+    presence_penalty = max(-2.0, min(2.0, presence_penalty))
+    frequency_penalty = max(-2.0, min(2.0, frequency_penalty))
 
-    while True:
-        try:
-            # 获取用户输入
-            user_input = input("\n用户输入: ").strip()
+    url = f"{DOUBAO_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {DOUBAO_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "top_p": top_p,
+        "presence_penalty": presence_penalty,
+        "frequency_penalty": frequency_penalty,
+        "stream": stream,
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+    if stop is not None:
+        payload["stop"] = stop
+    if extra:
+        payload.update(extra)
 
-            if not user_input:
-                continue
+    out = []
+    with requests.post(url, headers=headers, data=json.dumps(payload), stream=stream, timeout=timeout) as r:
+        r.raise_for_status()
+        if stream:
+            for data in _iter_sse_lines(r):
+                try:
+                    obj = json.loads(data)
+                    delta = obj.get("choices", [{}])[0].get("delta", {})
+                    piece = delta.get("content") or ""
+                    if piece:
+                        _print_char_by_char(piece)
+                        out.append(piece)
+                except Exception:
+                    continue
+            _finalize_stream()
+        else:
+            obj = r.json()
+            text = obj.get("choices", [{}])[0].get("message", {}).get("content", "")
+            _print_char_by_char(text)
+            _finalize_stream()
+            out.append(text)
+    return "".join(out)
 
-            # 处理命令
-            if user_input.startswith('/'):
-                parts = user_input.split(maxsplit=1)
-                command = parts[0].lower()
-                args = parts[1] if len(parts) > 1 else ""
 
-                if command == '/exit':
-                    # 退出前自动保存
-                    if deepseek.conversation_history:
-                        save_choice = input("是否保存当前对话历史? (y/n): ").lower() == 'y'
-                        if save_choice:
-                            deepseek.save_history()
-                    print("程序已退出")
-                    break
+def call_qwen_chat(
+    model: str,
+    messages: T.List[dict],
+    temperature: float = 0.8,
+    top_p: float = 1.0,
+    max_tokens: T.Optional[int] = None,
+    stop: T.Optional[T.Union[str, T.List[str]]] = None,
+    stream: bool = True,
+    timeout: int = 600,
+    extra: T.Optional[dict] = None,
+) -> str:
+    """
+    通义千问（阿里云 Model Studio / DashScope）OpenAI 兼容 Chat Completions
+    Endpoint（OpenAI 兼容）：
+        新加坡: {QWEN_BASE_URL}/chat/completions
+        北京:   https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+    认证：Authorization: Bearer <DASHSCOPE_API_KEY>
 
-                elif command == '/reset':
-                    deepseek.reset_history()
+    支持参数（OpenAI 兼容）：
+    - model: str（如 "qwen-plus", "qwen-turbo", "qwen-max" 等）
+    - messages: List[dict]
+    - temperature: float ∈ [0, 2]
+    - top_p: float ∈ (0, 1]
+    - max_tokens: int > 0（可选）
+    - stop: str | List[str]
+    - stream: bool（默认 True，SSE 流式）
+    - extra: dict 透传（如 stream_options={"include_usage": True}）
 
-                elif command == '/history':
-                    deepseek.print_history()
+    返回：同上。
+    """
+    if top_p is not None:
+        top_p = max(0.0, min(1.0, top_p))
 
-                elif command == '/params':
-                    print("\n当前参数设置:")
-                    for key, value in deepseek.default_params.items():
-                        print(f"  {key}: {value}")
+    url = f"{QWEN_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {QWEN_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "top_p": top_p,
+        "stream": stream,
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+    if stop is not None:
+        payload["stop"] = stop
+    if extra:
+        payload.update(extra)
 
-                elif command == '/file' and args:
-                    deepseek.read_file(args)
+    out = []
+    with requests.post(url, headers=headers, data=json.dumps(payload), stream=stream, timeout=timeout) as r:
+        r.raise_for_status()
+        if stream:
+            for data in _iter_sse_lines(r):
+                try:
+                    obj = json.loads(data)
+                    delta = obj.get("choices", [{}])[0].get("delta", {})
+                    piece = delta.get("content") or ""
+                    if piece:
+                        _print_char_by_char(piece)
+                        out.append(piece)
+                except Exception:
+                    continue
+            _finalize_stream()
+        else:
+            obj = r.json()
+            text = obj.get("choices", [{}])[0].get("message", {}).get("content", "")
+            _print_char_by_char(text)
+            _finalize_stream()
+            out.append(text)
+    return "".join(out)
 
-                elif command == '/save':
-                    deepseek.save_history(args)
 
-                elif command == '/load' and args:
-                    deepseek.load_history(args)
+def call_deepseek_chat(
+    model: str,
+    messages: T.List[dict],
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    max_tokens: T.Optional[int] = None,
+    presence_penalty: float = 0.0,
+    frequency_penalty: float = 0.0,
+    stop: T.Optional[T.Union[str, T.List[str]]] = None,
+    stream: bool = True,
+    timeout: int = 600,
+    extra: T.Optional[dict] = None,
+) -> str:
+    """
+    DeepSeek Chat Completions（OpenAI 兼容）
+    Endpoint: {DEEPSEEK_BASE_URL}/chat/completions
+    认证：Authorization: Bearer <DEEPSEEK_API_KEY>
 
-                elif command == '/list':
-                    deepseek.list_saved_histories()
+    支持参数（官方文档明确范围）：
+    - model: str，例如：
+        "deepseek-chat"（对应 DeepSeek-V3）
+        "deepseek-reasoner"（对应 DeepSeek-R1）
+    - messages: List[dict]
+    - temperature: float ∈ [0, 2]（默认 1）
+    - top_p: float ∈ (0, 1]（默认 1）
+    - max_tokens: int ∈ [1, 8192]（不填默认为 4096）
+    - presence_penalty: float ∈ [-2, 2]
+    - frequency_penalty: float ∈ [-2, 2]
+    - stop: str | List[str]（最多 16）
+    - stream: bool（默认 True，SSE 流式；末尾含 data:[DONE]）
+    - extra: dict（如 response_format={"type": "json_object"}、tools、tool_choice 等）
 
-                else:
-                    print("未知命令，可用命令: /file, /reset, /history, /params, /save, /load, /list, /exit")
-                continue
+    返回：同上。
+    """
+    if top_p is not None:
+        top_p = max(0.0, min(1.0, top_p))
+    presence_penalty = max(-2.0, min(2.0, presence_penalty))
+    frequency_penalty = max(-2.0, min(2.0, frequency_penalty))
 
-            # 处理普通对话
-            stream = input("使用流式输出? (y/n): ").lower() == 'y'
-            deepseek.chat(user_input, stream=stream)
+    url = f"{DEEPSEEK_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "top_p": top_p,
+        "presence_penalty": presence_penalty,
+        "frequency_penalty": frequency_penalty,
+        "stream": stream,
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+    if stop is not None:
+        payload["stop"] = stop
+    if extra:
+        payload.update(extra)
 
-        except KeyboardInterrupt:
-            print("\n程序已中断")
-            break
-        except Exception as e:
-            print(f"发生错误: {str(e)}")
+    out = []
+    with requests.post(url, headers=headers, data=json.dumps(payload), stream=stream, timeout=timeout) as r:
+        r.raise_for_status()
+        if stream:
+            for data in _iter_sse_lines(r):
+                try:
+                    obj = json.loads(data)
+                    delta = obj.get("choices", [{}])[0].get("delta", {})
+                    piece = delta.get("content") or ""
+                    if piece:
+                        _print_char_by_char(piece)
+                        out.append(piece)
+                except Exception:
+                    continue
+            _finalize_stream()
+        else:
+            obj = r.json()
+            text = obj.get("choices", [{}])[0].get("message", {}).get("content", "")
+            _print_char_by_char(text)
+            _finalize_stream()
+            out.append(text)
+    return "".join(out)
 
+
+# ========== 4) 统一调度函数（按 provider 路由） ==========
+
+def run_chat(
+    provider: str,
+    model: str,
+    prompt: T.Union[str, T.List[dict]],
+    # 常用参数（其余通过 extra 透传）
+    temperature: T.Optional[float] = None,
+    top_p: T.Optional[float] = None,
+    max_tokens: T.Optional[int] = None,
+    stream: bool = True,
+    stop: T.Optional[T.Union[str, T.List[str]]] = None,
+    presence_penalty: T.Optional[float] = None,
+    frequency_penalty: T.Optional[float] = None,
+    extra: T.Optional[dict] = None,
+) -> str:
+    """
+    统一入口：
+    - provider: "kimi" | "豆包" | "千问" | "deepseek"
+    - model: 厂商具体模型名
+    - prompt: str（将自动包装为 [{"role":"user","content": prompt}]）
+              或 OpenAI 风格的 messages: List[dict]
+    - 其他参数：仅填与当前厂商相符的那些；不需要的留空。
+    返回：完整文本（即便流式打印了，也会汇总返回）
+    """
+    if isinstance(prompt, str):
+        messages = [{"role": "user", "content": prompt}]
+    else:
+        messages = prompt
+
+    provider = provider.lower()
+    kw = dict(
+        model=model,
+        messages=messages,
+        stream=stream,
+        extra=extra or {},
+    )
+
+    if temperature is not None:
+        kw["temperature"] = temperature
+    if top_p is not None:
+        kw["top_p"] = top_p
+    if max_tokens is not None:
+        kw["max_tokens"] = max_tokens
+    if stop is not None:
+        kw["stop"] = stop
+    if presence_penalty is not None:
+        kw["presence_penalty"] = presence_penalty
+    if frequency_penalty is not None:
+        kw["frequency_penalty"] = frequency_penalty
+
+    if provider == "kimi":
+        return call_kimi_chat(**kw)
+    elif provider == "豆包":
+        return call_doubao_chat(**kw)
+    elif provider in ("千问", "通义千问"):
+        return call_qwen_chat(**kw)
+    elif provider == "deepseek":
+        return call_deepseek_chat(**kw)
+    else:
+        raise ValueError(f"Unsupported provider: {provider}. Use one of: kimi | 豆包 | 千问 | deepseek")
+
+
+# ========== 5) 示例：在 __main__ 中通过“参数方式”调用 ==========
 
 if __name__ == "__main__":
-    main()
+    """
+    运行示例：
+    1) 先在本文件顶部填好各家的 API Key（或用环境变量）
+    2) 在下方选择你要试的 provider / model / 参数 / 提示词
+    3) python multi_llm_basic.py
+    """
+
+    # ——示例 A：DeepSeek（流式，逐字打印）——
+    run_chat(
+        provider="豆包",
+        model="doubao-1-5-thinking-pro-m-250428",           # 或 "deepseek-reasoner"
+        prompt="帮我写一个可以调用各大模型API的Python，需要包括KIMI、豆包、通义千问、DeepSeek 在开头的位置填写各大模型的aipkey，在每个模型接口内部写清楚都支持那些参数，以及参数的选择范围。 在__name__ = main 后边写调用函数，模型、模型的参数和提示词都通过参数的方法调用，仅支持基本功能即可，全部默认一个字一个字返回。",
+        temperature=0.1,
+        top_p=1.0,
+        max_tokens=3000,
+        stream=True,                     # 默认 True：逐字输出
+    )
+
+    # ——示例 B：通义千问（一次性返回，可改为 stream=True）——
+    # run_chat(
+    #     provider="qwen",
+    #     model="qwen-plus",
+    #     prompt="给我一份 5 条的 Python 代码优化建议清单。",
+    #     temperature=0.6,
+    #     max_tokens=400,
+    #     stream=False,  # 关闭流式，一次性打印
+    # )
+
+    # ——示例 C：豆包 Ark（ep-xxxx 推理接入点）——
+    # run_chat(
+    #     provider="doubao",
+    #     model="ep-20250101000000-xxxx",   # 替换成你的推理接入点模型 ID
+    #     prompt="请用要点列出敏捷开发迭代的关键实践。",
+    #     temperature=1.0,
+    #     presence_penalty=0.0,
+    #     frequency_penalty=0.0,
+    #     stream=True,
+    # )
+
+    # ——示例 D：Kimi / Moonshot（注意 temperature ∈ [0,1]）——
+    # run_chat(
+    #     provider="kimi",
+    #     model="moonshot-v1-8k",  # 或 kimi-k2-0711-preview 等
+    #     prompt="把下列句子改写得更专业简洁：我已经完成了报告的初稿。",
+    #     temperature=0.3,         # Kimi 仅 [0,1]
+    #     top_p=0.95,
+    #     stream=True,
+    # )
