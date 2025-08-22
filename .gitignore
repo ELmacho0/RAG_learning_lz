@@ -6,6 +6,7 @@ __pycache__/
 # Virtual environments
 venv/
 .venv/
+.venv311
 
 # Packaging
 build/
@@ -27,3 +28,4 @@ dist/
 # OS / misc
 .DS_Store
 *.log
+
