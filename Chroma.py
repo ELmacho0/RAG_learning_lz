@@ -43,12 +43,13 @@ collection = client.get_or_create_collection(
 
 # ---------- 写入示例 ----------
 docs = [
-    "向量数据库适合做相似度检索与RAG召回。",
-    "我更希望通过通义千问的最新embedding模型来向量化文本。",
-    "Chroma 在 Windows 上用 PersistentClient 可以直接落盘。"
+    "中医的某些治愈案例当前的现代医学还无法理解。",
+    "AIagent是人工智能下一个阶段的发展方向",
+    "如何调用通义千问的API接口使用其embidding模型然后将转化后的向量存入本地向量数据库",
+    "可以通过OpenAI提供的通用接口使用千问的嵌入模型，使用Python创建本地chroma数据库并导入转化后的向量"
 ]
-ids = ["d1", "d2", "d3"]
-metas = [{"lang": "zh"}, {"lang": "zh"}, {"lang": "zh"}]
+ids = ["d1", "d2", "d3", "d4"]
+metas = [{"lang": "zh"}, {"lang": "zh"}, {"lang": "zh"}, {"lang": "zh"}]
 
 embs = embed_texts(docs)  # 先生成向量
 collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embs)
@@ -57,10 +58,15 @@ collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embs)
 query = "怎么用千问做文本向量化并存储到Chroma？"
 qvec = embed_texts([query])[0]
 res = collection.query(
-    query_embeddings=[qvec],
-    n_results=3,
-    include=["ids", "documents", "metadatas", "distances"]
+    query_embeddings=[qvec],      # 你用的是自算向量，就保持用 query_embeddings
+    n_results=8,
+    include=["documents", "metadatas", "distances"]
 )
+
+print(res.keys())        # 看看有哪些键：通常含 'ids'、以及你 include 的字段
+print(res["ids"])        # 直接取 id
+print(res["documents"])  # 取文档
+print(res["distances"])  # 距离：越小越相似
 
 print(res)
 # 提示：cosine 距离越小越相似
