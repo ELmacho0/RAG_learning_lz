@@ -1,0 +1,14 @@
+{
+  "users": [
+    {"username": "user01", "password": "pass01"},
+    {"username": "user02", "password": "pass02"},
+    {"username": "user03", "password": "pass03"},
+    {"username": "user04", "password": "pass04"},
+    {"username": "user05", "password": "pass05"},
+    {"username": "user06", "password": "pass06"},
+    {"username": "user07", "password": "pass07"},
+    {"username": "user08", "password": "pass08"},
+    {"username": "user09", "password": "pass09"},
+    {"username": "user10", "password": "pass10"}
+  ]
+}

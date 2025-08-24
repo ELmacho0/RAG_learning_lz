@@ -1,0 +1,12 @@
+streamlit>=1.32
+chromadb>=0.4
+pymupdf
+pdf2image
+Pillow
+opencv-python
+rapidocr-onnxruntime
+python-docx
+docx2pdf
+camelot-py[cv]
+openpyxl
+dashscope
