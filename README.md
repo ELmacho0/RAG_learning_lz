@@ -12,10 +12,17 @@ The project is structured so that further development can add document parsing, 
 `text-embedding-v4`, storage in Chroma and retrieval augmented generation following the detailed specification.
 
 ## Running
-Install dependencies and start the Streamlit app:
+Install dependencies (including `openai>=1.0`) and start the Streamlit app. Before
+launching the app, set `DASHSCOPE_API_KEY` in the environment so the client can
+authenticate against DashScope. Optionally set `DASHSCOPE_BASE_URL` to override
+the default endpoint.
 
 ```bash
 pip install -r requirements.txt
+
+export DASHSCOPE_API_KEY="<your_api_key>"
+# export DASHSCOPE_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
 streamlit run app/main.py
 ```
 
