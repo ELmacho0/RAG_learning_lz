@@ -17,14 +17,19 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 # ---------- OpenAI/Qwen Client ----------
 def get_client() -> "OpenAI":
     """Return an OpenAI-compatible client for Qwen models."""
-    if OpenAI is None:
-        raise RuntimeError("openai package not available")
+    if OpenAI is None:  # pragma: no cover - dependency injection
+        raise RuntimeError(
+            "The 'openai' package is required. Install dependencies with `pip install -r requirements.txt`."
+        )
     api_key = os.getenv("DASHSCOPE_API_KEY")
     base_url = os.getenv(
         "DASHSCOPE_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     )
     if not api_key:
-        raise RuntimeError("DASHSCOPE_API_KEY not set")
+        raise RuntimeError(
+            "DASHSCOPE_API_KEY environment variable not set. "
+            "Export it before running the app, e.g. `export DASHSCOPE_API_KEY=...`."
+        )
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
