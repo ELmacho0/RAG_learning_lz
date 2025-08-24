@@ -4,7 +4,10 @@ from pathlib import Path
 
 import streamlit as st
 
+
 import rag  # local retrieval utilities
+
+=======
 
 ACCOUNTS_FILE = Path(__file__).resolve().parent.parent / "config" / "accounts.json"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -53,6 +56,7 @@ def chat_page():
                 st.write(answer)
             except Exception as e:
                 st.error(str(e))
+            st.info("暂未接入向量检索，示例回答：未上传文档")
 
 
 def kb_page():
@@ -70,6 +74,8 @@ def kb_page():
             except Exception as e:
                 st.error(f"索引 {file.name} 失败: {e}")
         st.success("上传并入库完成")
+        st.success("上传成功")
+
     if uploads_dir.exists():
         st.write("当前已有文件：")
         for p in uploads_dir.iterdir():
